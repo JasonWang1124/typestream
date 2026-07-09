@@ -1,34 +1,82 @@
 "use client";
 
-import { Suspense, useEffect, useRef } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import VideoPlayer from "@/components/VideoPlayer";
 import ThemeToggle from "@/components/ThemeToggle";
 import { useTyping } from "@/hooks/useTyping";
-import { DEMO_SENTENCES } from "@/lib/sentences";
+import type { Sentence } from "@/lib/sentences";
 import styles from "./practice.module.css";
-
-function prefersReducedMotion() {
-  return (
-    typeof window !== "undefined" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
 
 function Practice() {
   const params = useParams<{ videoId: string }>();
   const searchParams = useSearchParams();
   const router = useRouter();
   const videoId = params.videoId;
-  const title = searchParams.get("title") || "跟著字幕打字";
 
-  const t = useTyping(DEMO_SENTENCES);
+  const [sentences, setSentences] = useState<Sentence[]>([]);
+  const [title, setTitle] = useState(searchParams.get("title") || "跟著字幕打字");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  // fetch the real transcript for this video (cached per session)
+  useEffect(() => {
+    let alive = true;
+    const cacheKey = `st_${videoId}`;
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        setSentences(parsed.sentences);
+        if (parsed.title) setTitle(parsed.title);
+        setLoading(false);
+        return;
+      }
+    } catch {
+      // ignore cache errors
+    }
+
+    setLoading(true);
+    fetch("/api/transcript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        lang: "en",
+      }),
+    })
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || "無法載入字幕");
+        return data;
+      })
+      .then((data) => {
+        if (!alive) return;
+        setSentences(data.sentences);
+        if (data.title) setTitle(data.title);
+        setLoading(false);
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify(data));
+        } catch {
+          // storage may be full / unavailable
+        }
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setError(e instanceof Error ? e.message : "無法載入字幕");
+        setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [videoId]);
+
   const {
     idx,
     typed,
     target,
     statuses,
-    isComplete,
     isPerfect,
     wpm,
     accuracy,
@@ -38,87 +86,86 @@ function Practice() {
     backspace,
     next,
     reset,
-  } = t;
+  } = useTyping(sentences);
 
   const typeAreaRef = useRef<HTMLDivElement>(null);
-  const wpmRef = useRef<HTMLDivElement>(null);
+  const captureRef = useRef<HTMLInputElement>(null);
+  const composingRef = useRef(false);
   const prevPerfect = useRef(false);
+  const [caret, setCaret] = useState({ x: 0, y: 0, h: 0, show: false });
 
-  // keyboard input
+  const focusCapture = useCallback(() => {
+    captureRef.current?.focus({ preventScroll: true });
+  }, []);
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (done) return;
-      if (e.altKey || e.ctrlKey || e.metaKey) return;
-      if (e.key === "Backspace") {
-        e.preventDefault();
-        backspace();
-        return;
-      }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        next();
-        return;
-      }
-      if (e.key.length === 1) {
-        e.preventDefault();
-        typeChar(e.key);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [done, backspace, next, typeChar]);
+    if (!loading && !error) focusCapture();
+  }, [loading, error, focusCapture]);
 
-  // perfect line -> spark burst + auto advance
+  const onCaptureChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (composingRef.current) return;
+    const v = e.target.value;
+    for (const ch of v) {
+      if (ch === "\n") next();
+      else typeChar(ch);
+    }
+    e.target.value = "";
+  };
+  const onCaptureKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      backspace();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      next();
+    }
+  };
+
   useEffect(() => {
     if (isPerfect && !prevPerfect.current) {
       prevPerfect.current = true;
-      if (!prefersReducedMotion()) sparkBurst(typeAreaRef.current);
-      const timer = setTimeout(() => next(), 260);
+      const timer = setTimeout(() => next(), 240);
       return () => clearTimeout(timer);
     }
     if (!isPerfect) prevPerfect.current = false;
   }, [isPerfect, next]);
 
-  // little bump on the wpm number as it changes
-  useEffect(() => {
-    const el = wpmRef.current;
-    if (!el || prefersReducedMotion()) return;
-    el.classList.remove(styles.bump);
-    void el.offsetWidth;
-    el.classList.add(styles.bump);
-  }, [wpm]);
-
-  const charClass = (status: string, wrongSpace = false) => {
-    if (status === "correct") return `${styles.ch} ${styles.correct}`;
-    if (status === "wrong")
-      return `${styles.ch} ${styles.wrong}${wrongSpace ? ` ${styles.wrongSpace}` : ""}`;
-    return `${styles.ch} ${styles.pending}`;
-  };
+  // smooth caret: measure the current character's position each keystroke
+  useLayoutEffect(() => {
+    const area = typeAreaRef.current;
+    if (!area) return;
+    const el = area.querySelector<HTMLElement>(`[data-ci="${typed.length}"]`);
+    if (!el) {
+      setCaret((c) => ({ ...c, show: false }));
+      return;
+    }
+    const ar = area.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    setCaret({ x: r.left - ar.left, y: r.top - ar.top, h: r.height, show: true });
+  }, [typed, target, idx]);
 
   const renderChar = (i: number) => {
     const status = statuses[i];
     const c = target[i];
-    const isCaret = i === typed.length;
-    // on a mistake, show the character the user actually typed (monkeytype-style)
     const shown = status === "wrong" ? typed[i] ?? c : c;
-    const isSpaceGlyph = shown === " ";
+    const isSpace = shown === " ";
+    const cls =
+      status === "correct"
+        ? `${styles.ch} ${styles.correct}`
+        : status === "wrong"
+        ? `${styles.ch} ${styles.wrong}${isSpace ? ` ${styles.wrongSpace}` : ""}`
+        : `${styles.ch} ${styles.pending}`;
     return (
-      <span
-        key={i}
-        className={charClass(status, status === "wrong" && isSpaceGlyph)}
-        data-correct={status === "correct" ? "1" : undefined}
-      >
-        {isCaret && <span className={styles.caret} aria-hidden="true" />}
-        {isSpaceGlyph ? " " : shown}
+      <span key={i} data-ci={i} className={cls}>
+        {isSpace ? " " : shown}
       </span>
     );
   };
 
-  // group chars into words so a word never breaks mid-way; wraps happen at spaces
   const renderSentence = () => {
     const tokens = target.match(/(\s+|\S+)/g) ?? [];
     let gi = 0;
-    return tokens.map((tok, ti) => {
+    const out = tokens.map((tok, ti) => {
       const isSpace = /\s/.test(tok);
       const chars = [];
       for (let k = 0; k < tok.length; k++) {
@@ -131,95 +178,132 @@ function Practice() {
         </span>
       );
     });
+    out.push(
+      <span key="end" data-ci={target.length} className={styles.endMark}>
+        {"​"}
+      </span>
+    );
+    return out;
   };
 
-  const total = DEMO_SENTENCES.length;
+  const total = sentences.length;
 
-  return (
-    <div className={styles.wrap}>
-      <header className={styles.topbar}>
-        <span className={styles.brand}>
-          <span className="gradText">TypeStream</span>
-        </span>
-        <span className={styles.divider} />
-        <span className={styles.vidTitle}>{title}</span>
-        <div className={styles.topActions}>
-          <ThemeToggle />
-          <button className={styles.exit} onClick={() => router.push("/")}>
-            ← 換一部
+  const header = (
+    <header className={styles.topbar}>
+      <span className={`${styles.logo} mono`}>
+        <span className={styles.logoDot} />
+        typestream
+      </span>
+      <span className={styles.vidTitle}>{title}</span>
+      <div className={styles.topActions}>
+        <ThemeToggle />
+        <button
+          className={`${styles.exit} mono`}
+          onClick={(e) => {
+            e.stopPropagation();
+            router.push("/");
+          }}
+        >
+          esc
+        </button>
+      </div>
+    </header>
+  );
+
+  if (loading) {
+    return (
+      <div className={styles.wrap}>
+        {header}
+        <div className={styles.statusScreen}>
+          <div className={styles.spinner} />
+          <p className={`${styles.statusText} mono`}>載入字幕中…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={styles.wrap}>
+        {header}
+        <div className={styles.statusScreen}>
+          <p className={`${styles.errorText} mono`}>{error}</p>
+          <button className={`${styles.newBtn} mono`} onClick={() => router.push("/")}>
+            換一部
           </button>
         </div>
-      </header>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.wrap} onClick={focusCapture}>
+      {header}
 
       <div className={styles.stage}>
-        <div className={styles.videoPanel}>
-          <VideoPlayer videoId={videoId} />
+        <div className={styles.videoCol}>
+          <div className={styles.videoPanel}>
+            <VideoPlayer videoId={videoId} />
+          </div>
         </div>
 
-        <div className={styles.right}>
-          <div className={styles.stats}>
-            <div className={styles.stat}>
-              <div ref={wpmRef} className={`${styles.num} mono`}>
-                {wpm}
-              </div>
-              <div className={styles.lbl}>WPM</div>
+        <div className={styles.typeCol}>
+          <div className={`${styles.stats} mono`}>
+            <div className={styles.metric}>
+              <span className={styles.metricNum}>{wpm}</span>
+              <span className={styles.metricLbl}>wpm</span>
             </div>
-            <div className={styles.stat}>
-              <div className={`${styles.num} mono`}>
-                {accuracy}
-                <span className={styles.pct}>%</span>
-              </div>
-              <div className={styles.lbl}>正確率</div>
+            <div className={styles.metricDivider} />
+            <div className={styles.metric}>
+              <span className={styles.metricNum}>{accuracy}</span>
+              <span className={styles.metricLbl}>acc</span>
             </div>
-            <div className={styles.stat}>
-              <div className={`${styles.num} mono`}>
+            <div className={styles.metricDivider} />
+            <div className={styles.metric}>
+              <span className={styles.metricNum}>
                 {idx + 1}
-                <span className={styles.frac}>/{total}</span>
-              </div>
-              <div className={styles.lbl}>進度</div>
-              <div className={styles.progressTrack}>
-                <div
-                  className={styles.progressFill}
-                  style={{ width: `${progress * 100}%` }}
-                />
-              </div>
+                <span className={styles.metricFrac}>/{total}</span>
+              </span>
+              <span className={styles.metricLbl}>line</span>
+            </div>
+            <div className={styles.progressTrack}>
+              <div className={styles.progressFill} style={{ width: `${progress * 100}%` }} />
             </div>
           </div>
 
           <div className={styles.typeCard}>
             <div className={`${styles.typeArea} mono`} ref={typeAreaRef}>
               {idx > 0 && (
-                <span className={`${styles.sent} ${styles.doneSent}`}>
-                  {DEMO_SENTENCES[idx - 1].text}
-                </span>
+                <div className={`${styles.line} ${styles.lineDone}`}>
+                  {sentences[idx - 1].text}
+                </div>
               )}
-
-              <span className={styles.sent}>
+              <div className={styles.line}>
                 {renderSentence()}
-                {isComplete && (
-                  <span className={`${styles.ch} ${styles.pending}`}>
-                    <span className={styles.caret} aria-hidden="true" />
-                    {" "}
-                  </span>
+                {caret.show && (
+                  <span
+                    className={styles.caret}
+                    aria-hidden="true"
+                    style={{
+                      transform: `translate(${caret.x}px, ${caret.y}px)`,
+                      height: caret.h,
+                    }}
+                  />
                 )}
-              </span>
-
+              </div>
               {idx + 1 < total && (
-                <span className={`${styles.sent} ${styles.upcoming}`}>
-                  {DEMO_SENTENCES[idx + 1].text}
-                </span>
+                <div className={`${styles.line} ${styles.lineNext}`}>
+                  {sentences[idx + 1].text}
+                </div>
               )}
             </div>
 
-            <div className={styles.hint}>
+            <div className={`${styles.hint} mono`}>
               <span>
-                <kbd>字母</kbd> 打字
+                <kbd>enter</kbd> next
               </span>
               <span>
-                <kbd>Enter</kbd> 下一句
-              </span>
-              <span>
-                <kbd>Backspace</kbd> 修正
+                <kbd>⌫</kbd> fix
               </span>
             </div>
           </div>
@@ -227,59 +311,50 @@ function Practice() {
       </div>
 
       {done && (
-        <div className={styles.doneOverlay}>
+        <div className={styles.doneOverlay} onClick={(e) => e.stopPropagation()}>
           <div className={styles.doneCard}>
-            <h2>完成 🎉</h2>
-            <p>整段字幕都打完了。</p>
+            <span className={`${styles.doneLabel} mono`}>session complete</span>
             <div className={styles.doneStats}>
-              <div>
-                <div className={`${styles.doneNum} gradText mono`}>{wpm}</div>
-                <div className={styles.lbl}>WPM</div>
+              <div className={styles.doneMetric}>
+                <span className={`${styles.doneNum} mono`}>{wpm}</span>
+                <span className={`${styles.doneLbl} mono`}>wpm</span>
               </div>
-              <div>
-                <div className={`${styles.doneNum} gradText mono`}>{accuracy}%</div>
-                <div className={styles.lbl}>正確率</div>
+              <div className={styles.doneMetric}>
+                <span className={`${styles.doneNum} mono`}>{accuracy}</span>
+                <span className={`${styles.doneLbl} mono`}>accuracy</span>
               </div>
             </div>
-            <button className={styles.againBtn} onClick={reset}>
-              再打一次
-            </button>
+            <div className={styles.doneActions}>
+              <button className={`${styles.againBtn} mono`} onClick={reset}>
+                Type again
+              </button>
+              <button className={`${styles.newBtn} mono`} onClick={() => router.push("/")}>
+                New video
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+      <input
+        ref={captureRef}
+        className={styles.capture}
+        onChange={onCaptureChange}
+        onKeyDown={onCaptureKeyDown}
+        onCompositionStart={() => (composingRef.current = true)}
+        onCompositionEnd={(e) => {
+          composingRef.current = false;
+          e.currentTarget.value = "";
+        }}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        inputMode="text"
+        aria-hidden="true"
+      />
     </div>
   );
-}
-
-function sparkBurst(area: HTMLElement | null) {
-  let x = window.innerWidth / 2;
-  let y = window.innerHeight / 2;
-  // anchor at the right edge of the last correct char, if we can find it
-  const corrects = area?.querySelectorAll('[data-correct="1"]');
-  if (corrects && corrects.length) {
-    const r = corrects[corrects.length - 1].getBoundingClientRect();
-    x = r.right;
-    y = r.top + r.height / 2;
-  }
-  const colors = ["#6d5efc", "#00d4ff", "#b06dff", "#eef0ff", "#ff5c7a"];
-  for (let i = 0; i < 22; i++) {
-    const s = document.createElement("div");
-    s.className = "spark";
-    const ang = (2 * Math.PI * i) / 22 + (Math.random() - 0.5) * 0.6;
-    const dist = 45 + Math.random() * 75;
-    const size = 4 + Math.random() * 4;
-    s.style.left = `${x}px`;
-    s.style.top = `${y}px`;
-    s.style.width = `${size}px`;
-    s.style.height = `${size}px`;
-    s.style.background = colors[i % colors.length];
-    s.style.boxShadow = `0 0 8px ${colors[i % colors.length]}`;
-    s.style.setProperty("--tx", `${Math.cos(ang) * dist}px`);
-    s.style.setProperty("--ty", `${Math.sin(ang) * dist - 22}px`);
-    s.style.setProperty("--dur", `${0.6 + Math.random() * 0.4}s`);
-    document.body.appendChild(s);
-    setTimeout(() => s.remove(), 1100);
-  }
 }
 
 export default function PracticePage() {
