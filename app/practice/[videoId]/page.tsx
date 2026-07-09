@@ -68,7 +68,7 @@ function Practice() {
     return () => window.removeEventListener("keydown", onKey);
   }, [done, backspace, next, typeChar]);
 
-  // perfect line → spark burst + auto advance
+  // perfect line -> spark burst + auto advance
   useEffect(() => {
     if (isPerfect && !prevPerfect.current) {
       prevPerfect.current = true;
@@ -88,10 +88,49 @@ function Practice() {
     el.classList.add(styles.bump);
   }, [wpm]);
 
-  const charClass = (status: string) => {
+  const charClass = (status: string, wrongSpace = false) => {
     if (status === "correct") return `${styles.ch} ${styles.correct}`;
-    if (status === "wrong") return `${styles.ch} ${styles.wrong}`;
+    if (status === "wrong")
+      return `${styles.ch} ${styles.wrong}${wrongSpace ? ` ${styles.wrongSpace}` : ""}`;
     return `${styles.ch} ${styles.pending}`;
+  };
+
+  const renderChar = (i: number) => {
+    const status = statuses[i];
+    const c = target[i];
+    const isCaret = i === typed.length;
+    // on a mistake, show the character the user actually typed (monkeytype-style)
+    const shown = status === "wrong" ? typed[i] ?? c : c;
+    const isSpaceGlyph = shown === " ";
+    return (
+      <span
+        key={i}
+        className={charClass(status, status === "wrong" && isSpaceGlyph)}
+        data-correct={status === "correct" ? "1" : undefined}
+      >
+        {isCaret && <span className={styles.caret} aria-hidden="true" />}
+        {isSpaceGlyph ? " " : shown}
+      </span>
+    );
+  };
+
+  // group chars into words so a word never breaks mid-way; wraps happen at spaces
+  const renderSentence = () => {
+    const tokens = target.match(/(\s+|\S+)/g) ?? [];
+    let gi = 0;
+    return tokens.map((tok, ti) => {
+      const isSpace = /\s/.test(tok);
+      const chars = [];
+      for (let k = 0; k < tok.length; k++) {
+        chars.push(renderChar(gi));
+        gi += 1;
+      }
+      return (
+        <span key={`t${ti}`} className={isSpace ? styles.space : styles.word}>
+          {chars}
+        </span>
+      );
+    });
   };
 
   const total = DEMO_SENTENCES.length;
@@ -156,23 +195,11 @@ function Practice() {
               )}
 
               <span className={styles.sent}>
-                {Array.from(target).map((c, i) => {
-                  const isCaret = i === typed.length;
-                  return (
-                    <span
-                      key={i}
-                      className={charClass(statuses[i])}
-                      data-correct={statuses[i] === "correct" ? "1" : undefined}
-                    >
-                      {isCaret && <span className={styles.caret} aria-hidden="true" />}
-                      {c === " " ? " " : c}
-                    </span>
-                  );
-                })}
+                {renderSentence()}
                 {isComplete && (
                   <span className={`${styles.ch} ${styles.pending}`}>
                     <span className={styles.caret} aria-hidden="true" />
-                    {" "}
+                    {" "}
                   </span>
                 )}
               </span>

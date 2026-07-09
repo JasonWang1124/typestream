@@ -20,13 +20,17 @@
   font-size: 13px;
   font-weight: 800;
   letter-spacing: -0.02em;
+  flex-shrink: 0;
 }
 .divider {
   width: 1px;
   height: 16px;
   background: var(--border);
+  flex-shrink: 0;
 }
 .vidTitle {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 13px;
   color: var(--text-dim);
   overflow: hidden;
@@ -45,6 +49,8 @@
   color: var(--text-dim);
   cursor: pointer;
   font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
   padding: 8px 13px;
   border-radius: 9px;
   transition: border-color 0.2s, color 0.2s;
@@ -68,7 +74,7 @@
 }
 @media (max-width: 860px) {
   .stage {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
     padding: 18px;
   }
@@ -162,6 +168,8 @@
   line-height: 2.05;
   letter-spacing: 0.01em;
   cursor: text;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 .sent {
   display: block;
@@ -175,6 +183,13 @@
 .upcoming {
   opacity: 0.34;
 }
+.word {
+  display: inline-block;
+  white-space: nowrap;
+}
+.space {
+  white-space: normal;
+}
 .ch {
   position: relative;
 }
@@ -184,6 +199,10 @@
 }
 .wrong {
   color: var(--wrong);
+}
+.wrongSpace {
+  background: color-mix(in srgb, var(--wrong) 32%, transparent);
+  border-radius: 2px;
 }
 .pending {
   color: var(--pending);
