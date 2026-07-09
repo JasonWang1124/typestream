@@ -1,0 +1,30 @@
+.toggle {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--glass);
+  color: var(--text-dim);
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: color 0.2s, border-color 0.2s, transform 0.15s;
+}
+
+.toggle:hover {
+  color: var(--text);
+  border-color: var(--border-hi);
+  transform: translateY(-1px);
+}
+
+.toggle:active {
+  transform: translateY(0);
+}
+
+.icon {
+  display: inline-flex;
+}
